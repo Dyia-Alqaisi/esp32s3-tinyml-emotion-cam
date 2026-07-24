@@ -1,0 +1,512 @@
+Phase 4 — OV3660 camera-only validation
+
+#include <Arduino.h>
+#include "esp_camera.h"
+#include "esp_err.h"
+
+// =========================================================
+// Freenove ESP32-S3-WROOM OV3660 camera pins
+// =========================================================
+
+constexpr int CAMERA_PIN_PWDN  = -1;
+constexpr int CAMERA_PIN_RESET = -1;
+
+constexpr int CAMERA_PIN_XCLK  = 15;
+constexpr int CAMERA_PIN_SIOD  = 4;
+constexpr int CAMERA_PIN_SIOC  = 5;
+
+constexpr int CAMERA_PIN_D0 = 11;
+constexpr int CAMERA_PIN_D1 = 9;
+constexpr int CAMERA_PIN_D2 = 8;
+constexpr int CAMERA_PIN_D3 = 10;
+constexpr int CAMERA_PIN_D4 = 12;
+constexpr int CAMERA_PIN_D5 = 18;
+constexpr int CAMERA_PIN_D6 = 17;
+constexpr int CAMERA_PIN_D7 = 16;
+
+constexpr int CAMERA_PIN_VSYNC = 6;
+constexpr int CAMERA_PIN_HREF  = 7;
+constexpr int CAMERA_PIN_PCLK  = 13;
+
+// =========================================================
+// Camera test configuration
+// =========================================================
+
+constexpr uint32_t CAMERA_XCLK_FREQUENCY = 20000000;
+
+constexpr size_t CAMERA_TEST_FRAMES = 100;
+constexpr size_t CAMERA_WARMUP_FRAMES = 5;
+
+constexpr uint32_t CAMERA_HEARTBEAT_INTERVAL_MS = 2000;
+
+// =========================================================
+// Runtime state
+// =========================================================
+
+uint32_t lastHeartbeatTime = 0;
+uint32_t continuousFrameNumber = 0;
+
+// =========================================================
+// Utility functions
+// =========================================================
+
+void stopWithError(const char* message)
+{
+    Serial.println();
+    Serial.println("========================================");
+    Serial.println("PHASE 4 RESULT: FAILED");
+    Serial.println(message);
+    Serial.println("Do not continue to Phase 5.");
+    Serial.println("========================================");
+
+    while (true) {
+        delay(1000);
+    }
+}
+
+bool isValidJpeg(const camera_fb_t* frame)
+{
+    if (frame == nullptr || frame->buf == nullptr) {
+        return false;
+    }
+
+    if (frame->len < 4) {
+        return false;
+    }
+
+    const bool validStart =
+        frame->buf[0] == 0xFF &&
+        frame->buf[1] == 0xD8;
+
+    const bool validEnd =
+        frame->buf[frame->len - 2] == 0xFF &&
+        frame->buf[frame->len - 1] == 0xD9;
+
+    return validStart && validEnd;
+}
+
+const char* getCameraName(uint16_t pid)
+{
+    switch (pid) {
+        case OV3660_PID:
+            return "OV3660";
+
+        case OV2640_PID:
+            return "OV2640";
+
+        case OV5640_PID:
+            return "OV5640";
+
+        default:
+            return "Unknown";
+    }
+}
+
+// =========================================================
+// Camera initialization
+// =========================================================
+
+bool initializeCamera()
+{
+    if (!psramFound()) {
+        Serial.println("PSRAM was not detected.");
+        return false;
+    }
+
+    camera_config_t config = {};
+
+    config.ledc_channel = LEDC_CHANNEL_0;
+    config.ledc_timer = LEDC_TIMER_0;
+
+    config.pin_d0 = CAMERA_PIN_D0;
+    config.pin_d1 = CAMERA_PIN_D1;
+    config.pin_d2 = CAMERA_PIN_D2;
+    config.pin_d3 = CAMERA_PIN_D3;
+    config.pin_d4 = CAMERA_PIN_D4;
+    config.pin_d5 = CAMERA_PIN_D5;
+    config.pin_d6 = CAMERA_PIN_D6;
+    config.pin_d7 = CAMERA_PIN_D7;
+
+    config.pin_xclk = CAMERA_PIN_XCLK;
+    config.pin_pclk = CAMERA_PIN_PCLK;
+    config.pin_vsync = CAMERA_PIN_VSYNC;
+    config.pin_href = CAMERA_PIN_HREF;
+
+    config.pin_sccb_sda = CAMERA_PIN_SIOD;
+    config.pin_sccb_scl = CAMERA_PIN_SIOC;
+
+    config.pin_pwdn = CAMERA_PIN_PWDN;
+    config.pin_reset = CAMERA_PIN_RESET;
+
+    config.xclk_freq_hz = CAMERA_XCLK_FREQUENCY;
+
+    /*
+     * JPEG is selected because the next phase will save
+     * complete camera frames directly to the SD card.
+     */
+    config.pixel_format = PIXFORMAT_JPEG;
+
+    /*
+     * VGA = 640 × 480.
+     *
+     * This is large enough for visual inspection while still
+     * being reasonable for repeated ESP32-S3 captures.
+     */
+    config.frame_size = FRAMESIZE_VGA;
+
+    /*
+     * Lower values mean higher JPEG quality.
+     * 12 is a balanced starting value.
+     */
+    config.jpeg_quality = 12;
+
+    /*
+     * Two frame buffers improve capture stability and speed.
+     * They are allocated in the 8 MB PSRAM.
+     */
+    config.fb_count = 2;
+    config.fb_location = CAMERA_FB_IN_PSRAM;
+    config.grab_mode = CAMERA_GRAB_LATEST;
+
+    Serial.println("Initializing OV3660 camera...");
+
+    const esp_err_t result = esp_camera_init(&config);
+
+    if (result != ESP_OK) {
+        Serial.printf(
+            "Camera initialization error: 0x%X — %s\n",
+            static_cast<unsigned int>(result),
+            esp_err_to_name(result)
+        );
+
+        return false;
+    }
+
+    return true;
+}
+
+// =========================================================
+// Warm-up capture
+// =========================================================
+
+bool warmUpCamera()
+{
+    Serial.printf(
+        "Discarding %u warm-up frames...\n",
+        static_cast<unsigned int>(CAMERA_WARMUP_FRAMES)
+    );
+
+    for (size_t i = 0; i < CAMERA_WARMUP_FRAMES; ++i) {
+        camera_fb_t* frame = esp_camera_fb_get();
+
+        if (frame == nullptr) {
+            Serial.printf(
+                "Warm-up frame %u failed.\n",
+                static_cast<unsigned int>(i + 1)
+            );
+
+            return false;
+        }
+
+        esp_camera_fb_return(frame);
+        delay(100);
+    }
+
+    Serial.println("Camera warm-up: PASS");
+
+    return true;
+}
+
+// =========================================================
+// 100-frame stability test
+// =========================================================
+
+bool runCameraStabilityTest()
+{
+    Serial.println("----------------------------------------");
+    Serial.printf(
+        "Starting %u-frame camera test...\n",
+        static_cast<unsigned int>(CAMERA_TEST_FRAMES)
+    );
+
+    size_t validFrames = 0;
+
+    size_t smallestFrame = SIZE_MAX;
+    size_t largestFrame = 0;
+    uint64_t totalFrameBytes = 0;
+
+    uint32_t fastestCapture = UINT32_MAX;
+    uint32_t slowestCapture = 0;
+    uint64_t totalCaptureTime = 0;
+
+    const uint32_t completeTestStart = millis();
+
+    for (size_t i = 0; i < CAMERA_TEST_FRAMES; ++i) {
+        const uint32_t captureStart = millis();
+
+        camera_fb_t* frame = esp_camera_fb_get();
+
+        const uint32_t captureDuration =
+            millis() - captureStart;
+
+        if (frame == nullptr) {
+            Serial.printf(
+                "Frame %u: CAPTURE FAILED\n",
+                static_cast<unsigned int>(i + 1)
+            );
+
+            continue;
+        }
+
+        const bool jpegValid = isValidJpeg(frame);
+
+        if (jpegValid) {
+            validFrames++;
+
+            totalFrameBytes += frame->len;
+
+            if (frame->len < smallestFrame) {
+                smallestFrame = frame->len;
+            }
+
+            if (frame->len > largestFrame) {
+                largestFrame = frame->len;
+            }
+
+            if (captureDuration < fastestCapture) {
+                fastestCapture = captureDuration;
+            }
+
+            if (captureDuration > slowestCapture) {
+                slowestCapture = captureDuration;
+            }
+
+            totalCaptureTime += captureDuration;
+        }
+
+        if (
+            i == 0 ||
+            (i + 1) % 10 == 0 ||
+            !jpegValid
+        ) {
+            Serial.printf(
+                "Frame %3u/%u | %6u bytes | %4lu ms | JPEG=%s\n",
+                static_cast<unsigned int>(i + 1),
+                static_cast<unsigned int>(CAMERA_TEST_FRAMES),
+                static_cast<unsigned int>(frame->len),
+                static_cast<unsigned long>(captureDuration),
+                jpegValid ? "PASS" : "FAIL"
+            );
+        }
+
+        esp_camera_fb_return(frame);
+        delay(20);
+    }
+
+    const uint32_t completeTestDuration =
+        millis() - completeTestStart;
+
+    if (validFrames == 0) {
+        Serial.println("No valid JPEG images were captured.");
+        return false;
+    }
+
+    const float averageFrameSize =
+        static_cast<float>(totalFrameBytes) /
+        static_cast<float>(validFrames);
+
+    const float averageCaptureTime =
+        static_cast<float>(totalCaptureTime) /
+        static_cast<float>(validFrames);
+
+    const float framesPerSecond =
+        static_cast<float>(validFrames) /
+        (static_cast<float>(completeTestDuration) / 1000.0f);
+
+    Serial.println("----------------------------------------");
+    Serial.println("Camera stability test results");
+
+    Serial.printf(
+        "Valid frames       : %u/%u\n",
+        static_cast<unsigned int>(validFrames),
+        static_cast<unsigned int>(CAMERA_TEST_FRAMES)
+    );
+
+    Serial.printf(
+        "Smallest JPEG      : %u bytes\n",
+        static_cast<unsigned int>(smallestFrame)
+    );
+
+    Serial.printf(
+        "Largest JPEG       : %u bytes\n",
+        static_cast<unsigned int>(largestFrame)
+    );
+
+    Serial.printf(
+        "Average JPEG       : %.1f bytes\n",
+        averageFrameSize
+    );
+
+    Serial.printf(
+        "Fastest capture    : %lu ms\n",
+        static_cast<unsigned long>(fastestCapture)
+    );
+
+    Serial.printf(
+        "Slowest capture    : %lu ms\n",
+        static_cast<unsigned long>(slowestCapture)
+    );
+
+    Serial.printf(
+        "Average capture    : %.1f ms\n",
+        averageCaptureTime
+    );
+
+    Serial.printf(
+        "Effective rate     : %.2f frames/s\n",
+        framesPerSecond
+    );
+
+    Serial.printf(
+        "Free heap          : %u bytes\n",
+        ESP.getFreeHeap()
+    );
+
+    Serial.printf(
+        "Free PSRAM         : %u bytes\n",
+        ESP.getFreePsram()
+    );
+
+    return validFrames == CAMERA_TEST_FRAMES;
+}
+
+// =========================================================
+// Arduino setup
+// =========================================================
+
+void setup()
+{
+    Serial.begin(115200);
+
+    // Allow native Hardware USB CDC to reconnect.
+    delay(2500);
+
+    Serial.println();
+    Serial.println("========================================");
+    Serial.println(" ALQAI EmotionCam - Camera Validation");
+    Serial.println("========================================");
+
+    Serial.printf("XCLK            : GPIO%d\n", CAMERA_PIN_XCLK);
+    Serial.printf("SIOD            : GPIO%d\n", CAMERA_PIN_SIOD);
+    Serial.printf("SIOC            : GPIO%d\n", CAMERA_PIN_SIOC);
+    Serial.printf("VSYNC           : GPIO%d\n", CAMERA_PIN_VSYNC);
+    Serial.printf("HREF            : GPIO%d\n", CAMERA_PIN_HREF);
+    Serial.printf("PCLK            : GPIO%d\n", CAMERA_PIN_PCLK);
+
+    Serial.println("Resolution      : VGA 640x480");
+    Serial.println("Pixel format    : JPEG");
+    Serial.println("Frame buffers   : 2 in PSRAM");
+    Serial.println("----------------------------------------");
+
+    if (!initializeCamera()) {
+        stopWithError("Camera initialization failed.");
+    }
+
+    Serial.println("Camera initialize: PASS");
+
+    sensor_t* sensor = esp_camera_sensor_get();
+
+    if (sensor == nullptr) {
+        stopWithError("Camera sensor information unavailable.");
+    }
+
+    Serial.printf(
+        "Sensor PID       : 0x%04X\n",
+        sensor->id.PID
+    );
+
+    Serial.printf(
+        "Sensor detected  : %s\n",
+        getCameraName(sensor->id.PID)
+    );
+
+    if (sensor->id.PID != OV3660_PID) {
+        Serial.println(
+            "Warning: detected sensor is not OV3660."
+        );
+    }
+
+    Serial.printf(
+        "Free heap        : %u bytes\n",
+        ESP.getFreeHeap()
+    );
+
+    Serial.printf(
+        "Free PSRAM       : %u bytes\n",
+        ESP.getFreePsram()
+    );
+
+    if (!warmUpCamera()) {
+        stopWithError("Camera warm-up failed.");
+    }
+
+    if (!runCameraStabilityTest()) {
+        stopWithError(
+            "One or more of the 100 camera frames failed."
+        );
+    }
+
+    Serial.println("----------------------------------------");
+    Serial.println("PHASE 4 RESULT  : ALL TESTS PASSED");
+    Serial.println("Camera is ready for SD integration.");
+    Serial.println("========================================");
+}
+
+// =========================================================
+// Continuous camera heartbeat
+// =========================================================
+
+void loop()
+{
+    const uint32_t currentTime = millis();
+
+    if (
+        currentTime - lastHeartbeatTime >=
+        CAMERA_HEARTBEAT_INTERVAL_MS
+    ) {
+        lastHeartbeatTime = currentTime;
+
+        const uint32_t captureStart = millis();
+
+        camera_fb_t* frame = esp_camera_fb_get();
+
+        const uint32_t captureDuration =
+            millis() - captureStart;
+
+        if (frame == nullptr) {
+            Serial.println(
+                "[Camera heartbeat] capture failed"
+            );
+
+            delay(10);
+            return;
+        }
+
+        continuousFrameNumber++;
+
+        Serial.printf(
+            "[Camera heartbeat] frame=%lu | bytes=%u | "
+            "capture=%lu ms | JPEG=%s | heap=%u | PSRAM=%u\n",
+            static_cast<unsigned long>(continuousFrameNumber),
+            static_cast<unsigned int>(frame->len),
+            static_cast<unsigned long>(captureDuration),
+            isValidJpeg(frame) ? "PASS" : "FAIL",
+            ESP.getFreeHeap(),
+            ESP.getFreePsram()
+        );
+
+        esp_camera_fb_return(frame);
+    }
+
+    delay(10);
+}

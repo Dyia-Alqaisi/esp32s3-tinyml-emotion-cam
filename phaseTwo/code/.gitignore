@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+outputs/*
+!outputs/.gitkeep
+dataset/*
+!dataset/neutral/
+!dataset/happy/
+!dataset/sad/
+!dataset/surprise/
+!dataset/neutral/.gitkeep
+!dataset/happy/.gitkeep
+!dataset/sad/.gitkeep
+!dataset/surprise/.gitkeep

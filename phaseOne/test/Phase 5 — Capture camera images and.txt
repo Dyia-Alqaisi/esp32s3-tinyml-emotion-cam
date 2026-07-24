@@ -1,0 +1,605 @@
+Phase 5 — Capture camera images and save them to SD
+
+#include <Arduino.h>
+#include "esp_camera.h"
+#include "FS.h"
+#include "SD_MMC.h"
+
+// =========================================================
+// OV3660 camera pins
+// =========================================================
+
+constexpr int CAMERA_PIN_PWDN  = -1;
+constexpr int CAMERA_PIN_RESET = -1;
+
+constexpr int CAMERA_PIN_XCLK = 15;
+constexpr int CAMERA_PIN_SIOD = 4;
+constexpr int CAMERA_PIN_SIOC = 5;
+
+constexpr int CAMERA_PIN_D0 = 11;
+constexpr int CAMERA_PIN_D1 = 9;
+constexpr int CAMERA_PIN_D2 = 8;
+constexpr int CAMERA_PIN_D3 = 10;
+constexpr int CAMERA_PIN_D4 = 12;
+constexpr int CAMERA_PIN_D5 = 18;
+constexpr int CAMERA_PIN_D6 = 17;
+constexpr int CAMERA_PIN_D7 = 16;
+
+constexpr int CAMERA_PIN_VSYNC = 6;
+constexpr int CAMERA_PIN_HREF  = 7;
+constexpr int CAMERA_PIN_PCLK  = 13;
+
+// =========================================================
+// Built-in SD-card pins
+// =========================================================
+
+constexpr int SD_PIN_CMD = 38;
+constexpr int SD_PIN_CLK = 39;
+constexpr int SD_PIN_D0  = 40;
+
+constexpr const char* SD_MOUNT_POINT = "/sdcard";
+
+// =========================================================
+// Test configuration
+// =========================================================
+
+constexpr size_t WARMUP_FRAME_COUNT = 5;
+constexpr size_t IMAGE_COUNT = 5;
+
+uint32_t lastHeartbeatTime = 0;
+
+// =========================================================
+// Error handling
+// =========================================================
+
+void stopWithError(const char* message)
+{
+    Serial.println();
+    Serial.println("========================================");
+    Serial.println("PHASE 5 RESULT: FAILED");
+    Serial.println(message);
+    Serial.println("Do not continue to Phase 6.");
+    Serial.println("========================================");
+
+    while (true) {
+        delay(1000);
+    }
+}
+
+// =========================================================
+// JPEG validation
+// =========================================================
+
+bool isValidJpegBuffer(const camera_fb_t* frame)
+{
+    if (frame == nullptr || frame->buf == nullptr) {
+        return false;
+    }
+
+    if (frame->len < 4) {
+        return false;
+    }
+
+    const bool validStart =
+        frame->buf[0] == 0xFF &&
+        frame->buf[1] == 0xD8;
+
+    const bool validEnd =
+        frame->buf[frame->len - 2] == 0xFF &&
+        frame->buf[frame->len - 1] == 0xD9;
+
+    return validStart && validEnd;
+}
+
+bool verifySavedJpeg(
+    const char* filePath,
+    size_t expectedSize
+)
+{
+    File file = SD_MMC.open(filePath, FILE_READ);
+
+    if (!file) {
+        Serial.println("Could not reopen saved image.");
+        return false;
+    }
+
+    const size_t actualSize = file.size();
+
+    if (actualSize != expectedSize) {
+        Serial.printf(
+            "File-size mismatch: expected %u, found %u\n",
+            static_cast<unsigned int>(expectedSize),
+            static_cast<unsigned int>(actualSize)
+        );
+
+        file.close();
+        return false;
+    }
+
+    if (actualSize < 4) {
+        Serial.println("Saved image is too small.");
+        file.close();
+        return false;
+    }
+
+    uint8_t startMarker[2] = {};
+    uint8_t endMarker[2] = {};
+
+    if (file.read(startMarker, 2) != 2) {
+        Serial.println("Could not read JPEG start marker.");
+        file.close();
+        return false;
+    }
+
+    if (!file.seek(actualSize - 2, SeekSet)) {
+        Serial.println("Could not seek to JPEG end marker.");
+        file.close();
+        return false;
+    }
+
+    if (file.read(endMarker, 2) != 2) {
+        Serial.println("Could not read JPEG end marker.");
+        file.close();
+        return false;
+    }
+
+    file.close();
+
+    const bool validStart =
+        startMarker[0] == 0xFF &&
+        startMarker[1] == 0xD8;
+
+    const bool validEnd =
+        endMarker[0] == 0xFF &&
+        endMarker[1] == 0xD9;
+
+    return validStart && validEnd;
+}
+
+// =========================================================
+// Camera initialization
+// =========================================================
+
+bool initializeCamera()
+{
+    if (!psramFound()) {
+        Serial.println("PSRAM was not detected.");
+        return false;
+    }
+
+    camera_config_t config = {};
+
+    config.ledc_channel = LEDC_CHANNEL_0;
+    config.ledc_timer = LEDC_TIMER_0;
+
+    config.pin_d0 = CAMERA_PIN_D0;
+    config.pin_d1 = CAMERA_PIN_D1;
+    config.pin_d2 = CAMERA_PIN_D2;
+    config.pin_d3 = CAMERA_PIN_D3;
+    config.pin_d4 = CAMERA_PIN_D4;
+    config.pin_d5 = CAMERA_PIN_D5;
+    config.pin_d6 = CAMERA_PIN_D6;
+    config.pin_d7 = CAMERA_PIN_D7;
+
+    config.pin_xclk = CAMERA_PIN_XCLK;
+    config.pin_pclk = CAMERA_PIN_PCLK;
+    config.pin_vsync = CAMERA_PIN_VSYNC;
+    config.pin_href = CAMERA_PIN_HREF;
+
+    config.pin_sccb_sda = CAMERA_PIN_SIOD;
+    config.pin_sccb_scl = CAMERA_PIN_SIOC;
+
+    config.pin_pwdn = CAMERA_PIN_PWDN;
+    config.pin_reset = CAMERA_PIN_RESET;
+
+    config.xclk_freq_hz = 20000000;
+
+    config.pixel_format = PIXFORMAT_JPEG;
+    config.frame_size = FRAMESIZE_VGA;
+    config.jpeg_quality = 12;
+
+    config.fb_count = 2;
+    config.fb_location = CAMERA_FB_IN_PSRAM;
+    config.grab_mode = CAMERA_GRAB_LATEST;
+
+    const esp_err_t result = esp_camera_init(&config);
+
+    if (result != ESP_OK) {
+        Serial.printf(
+            "Camera error: 0x%X — %s\n",
+            static_cast<unsigned int>(result),
+            esp_err_to_name(result)
+        );
+
+        return false;
+    }
+
+    sensor_t* sensor = esp_camera_sensor_get();
+
+    if (sensor == nullptr) {
+        Serial.println("Camera sensor object unavailable.");
+        return false;
+    }
+
+    if (sensor->id.PID != OV3660_PID) {
+        Serial.printf(
+            "Unexpected camera PID: 0x%04X\n",
+            sensor->id.PID
+        );
+
+        return false;
+    }
+
+    return true;
+}
+
+// =========================================================
+// Camera warm-up
+// =========================================================
+
+bool warmUpCamera()
+{
+    Serial.printf(
+        "Discarding %u warm-up frames...\n",
+        static_cast<unsigned int>(WARMUP_FRAME_COUNT)
+    );
+
+    for (size_t i = 0; i < WARMUP_FRAME_COUNT; ++i) {
+        camera_fb_t* frame = esp_camera_fb_get();
+
+        if (frame == nullptr) {
+            Serial.printf(
+                "Warm-up frame %u failed.\n",
+                static_cast<unsigned int>(i + 1)
+            );
+
+            return false;
+        }
+
+        esp_camera_fb_return(frame);
+        delay(100);
+    }
+
+    return true;
+}
+
+// =========================================================
+// SD initialization
+// =========================================================
+
+bool initializeSdCard()
+{
+    /*
+     * SD_MMC.setPins order:
+     * CLK, CMD, D0
+     */
+    if (!SD_MMC.setPins(
+            SD_PIN_CLK,
+            SD_PIN_CMD,
+            SD_PIN_D0
+        )) {
+        Serial.println("SD_MMC.setPins() failed.");
+        return false;
+    }
+
+    const bool mounted = SD_MMC.begin(
+        SD_MOUNT_POINT,
+        true,                 // 1-bit mode
+        false,                // Do not format automatically
+        SDMMC_FREQ_DEFAULT,   // 20 MHz
+        5
+    );
+
+    if (!mounted) {
+        Serial.println("SD-card mount failed.");
+        return false;
+    }
+
+    if (SD_MMC.cardType() == CARD_NONE) {
+        Serial.println("No SD card detected.");
+        return false;
+    }
+
+    if (!SD_MMC.exists("/captures")) {
+        if (!SD_MMC.mkdir("/captures")) {
+            Serial.println("Could not create /captures.");
+            return false;
+        }
+    }
+
+    return true;
+}
+
+// =========================================================
+// Capture and save one image
+// =========================================================
+
+bool captureAndSaveImage(
+    size_t imageNumber,
+    uint32_t& captureDuration,
+    uint32_t& writeDuration,
+    size_t& imageSize
+)
+{
+    char filePath[64];
+
+    snprintf(
+        filePath,
+        sizeof(filePath),
+        "/captures/phase5_%02u.jpg",
+        static_cast<unsigned int>(imageNumber)
+    );
+
+    if (SD_MMC.exists(filePath)) {
+        if (!SD_MMC.remove(filePath)) {
+            Serial.printf(
+                "Could not remove old file: %s\n",
+                filePath
+            );
+
+            return false;
+        }
+    }
+
+    // -----------------------------------------------------
+    // Capture frame
+    // -----------------------------------------------------
+
+    const uint32_t captureStart = millis();
+
+    camera_fb_t* frame = esp_camera_fb_get();
+
+    captureDuration = millis() - captureStart;
+
+    if (frame == nullptr) {
+        Serial.println("Camera capture returned null.");
+        return false;
+    }
+
+    if (!isValidJpegBuffer(frame)) {
+        Serial.println("Camera returned an invalid JPEG.");
+        esp_camera_fb_return(frame);
+        return false;
+    }
+
+    imageSize = frame->len;
+
+    // -----------------------------------------------------
+    // Write JPEG directly to SD
+    // -----------------------------------------------------
+
+    const uint32_t writeStart = millis();
+
+    File file = SD_MMC.open(filePath, FILE_WRITE);
+
+    if (!file) {
+        Serial.printf(
+            "Could not open %s for writing.\n",
+            filePath
+        );
+
+        esp_camera_fb_return(frame);
+        return false;
+    }
+
+    const size_t bytesWritten =
+        file.write(frame->buf, frame->len);
+
+    file.flush();
+    file.close();
+
+    writeDuration = millis() - writeStart;
+
+    esp_camera_fb_return(frame);
+
+    if (bytesWritten != imageSize) {
+        Serial.printf(
+            "Incomplete file write: %u/%u bytes\n",
+            static_cast<unsigned int>(bytesWritten),
+            static_cast<unsigned int>(imageSize)
+        );
+
+        return false;
+    }
+
+    // -----------------------------------------------------
+    // Reopen and validate the saved file
+    // -----------------------------------------------------
+
+    if (!verifySavedJpeg(filePath, imageSize)) {
+        Serial.printf(
+            "Saved JPEG verification failed: %s\n",
+            filePath
+        );
+
+        return false;
+    }
+
+    Serial.printf(
+        "Image %u saved: %s\n",
+        static_cast<unsigned int>(imageNumber),
+        filePath
+    );
+
+    return true;
+}
+
+// =========================================================
+// Arduino setup
+// =========================================================
+
+void setup()
+{
+    Serial.begin(115200);
+
+    // Allow native USB CDC to reconnect.
+    delay(2500);
+
+    Serial.println();
+    Serial.println("========================================");
+    Serial.println(" ALQAI EmotionCam - Camera + SD Test");
+    Serial.println("========================================");
+
+    Serial.println("Camera          : OV3660");
+    Serial.println("Resolution      : VGA 640x480");
+    Serial.println("Pixel format    : JPEG");
+    Serial.println("SD mode         : SDMMC 1-bit");
+    Serial.println("SD frequency    : 20 MHz");
+    Serial.println("----------------------------------------");
+
+    if (!initializeCamera()) {
+        stopWithError("Camera initialization failed.");
+    }
+
+    Serial.println("Camera initialize: PASS");
+
+    if (!warmUpCamera()) {
+        stopWithError("Camera warm-up failed.");
+    }
+
+    Serial.println("Camera warm-up   : PASS");
+
+    if (!initializeSdCard()) {
+        stopWithError("SD-card initialization failed.");
+    }
+
+    Serial.println("SD mount         : PASS");
+
+    Serial.printf(
+        "SD capacity      : %llu MB\n",
+        SD_MMC.cardSize() / (1024ULL * 1024ULL)
+    );
+
+    Serial.printf(
+        "Free heap        : %u bytes\n",
+        ESP.getFreeHeap()
+    );
+
+    Serial.printf(
+        "Free PSRAM       : %u bytes\n",
+        ESP.getFreePsram()
+    );
+
+    Serial.println("----------------------------------------");
+    Serial.printf(
+        "Capturing and saving %u images...\n",
+        static_cast<unsigned int>(IMAGE_COUNT)
+    );
+
+    uint64_t totalBytes = 0;
+    uint64_t totalCaptureTime = 0;
+    uint64_t totalWriteTime = 0;
+
+    for (size_t i = 1; i <= IMAGE_COUNT; ++i) {
+        uint32_t captureDuration = 0;
+        uint32_t writeDuration = 0;
+        size_t imageSize = 0;
+
+        const bool success = captureAndSaveImage(
+            i,
+            captureDuration,
+            writeDuration,
+            imageSize
+        );
+
+        if (!success) {
+            stopWithError("Image capture/save test failed.");
+        }
+
+        totalBytes += imageSize;
+        totalCaptureTime += captureDuration;
+        totalWriteTime += writeDuration;
+
+        const float writeSpeedKBps =
+            writeDuration > 0
+                ? (static_cast<float>(imageSize) / 1024.0f) /
+                    (static_cast<float>(writeDuration) / 1000.0f)
+                : 0.0f;
+
+        Serial.printf(
+            "  Size=%u bytes | capture=%lu ms | "
+            "write=%lu ms | %.1f KB/s | VERIFY=PASS\n",
+            static_cast<unsigned int>(imageSize),
+            static_cast<unsigned long>(captureDuration),
+            static_cast<unsigned long>(writeDuration),
+            writeSpeedKBps
+        );
+
+        delay(500);
+    }
+
+    const float averageImageSize =
+        static_cast<float>(totalBytes) /
+        static_cast<float>(IMAGE_COUNT);
+
+    const float averageCaptureTime =
+        static_cast<float>(totalCaptureTime) /
+        static_cast<float>(IMAGE_COUNT);
+
+    const float averageWriteTime =
+        static_cast<float>(totalWriteTime) /
+        static_cast<float>(IMAGE_COUNT);
+
+    Serial.println("----------------------------------------");
+    Serial.println("Camera + SD results");
+
+    Serial.printf(
+        "Images saved       : %u/%u\n",
+        static_cast<unsigned int>(IMAGE_COUNT),
+        static_cast<unsigned int>(IMAGE_COUNT)
+    );
+
+    Serial.printf(
+        "Average JPEG size  : %.1f bytes\n",
+        averageImageSize
+    );
+
+    Serial.printf(
+        "Average capture    : %.1f ms\n",
+        averageCaptureTime
+    );
+
+    Serial.printf(
+        "Average SD write   : %.1f ms\n",
+        averageWriteTime
+    );
+
+    Serial.printf(
+        "Free heap          : %u bytes\n",
+        ESP.getFreeHeap()
+    );
+
+    Serial.printf(
+        "Free PSRAM         : %u bytes\n",
+        ESP.getFreePsram()
+    );
+
+    Serial.println("----------------------------------------");
+    Serial.println("PHASE 5 RESULT    : ALL TESTS PASSED");
+    Serial.println("Power off before removing the SD card.");
+    Serial.println("Inspect the five JPEG files on a computer.");
+    Serial.println("========================================");
+}
+
+// =========================================================
+// Stable heartbeat — no repeated SD writes
+// =========================================================
+
+void loop()
+{
+    const uint32_t currentTime = millis();
+
+    if (currentTime - lastHeartbeatTime >= 5000) {
+        lastHeartbeatTime = currentTime;
+
+        Serial.printf(
+            "[Phase 5 heartbeat] uptime=%lu s | "
+            "heap=%u | PSRAM=%u\n",
+            currentTime / 1000,
+            ESP.getFreeHeap(),
+            ESP.getFreePsram()
+        );
+    }
+
+    delay(10);
+}

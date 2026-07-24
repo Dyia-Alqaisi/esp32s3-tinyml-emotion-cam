@@ -1,0 +1,360 @@
+OLED phase two 
+
+#include <Arduino.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+// =========================================================
+// OLED configuration
+// =========================================================
+
+constexpr int OLED_SDA = 42;
+constexpr int OLED_SCL = 41;
+
+
+
+constexpr uint8_t OLED_ADDRESS = 0x3C;
+constexpr uint32_t OLED_I2C_FREQUENCY = 400000;
+
+constexpr int OLED_WIDTH = 128;
+constexpr int OLED_HEIGHT = 64;
+
+// The common 4-pin SSD1306 module has no separate reset wire.
+constexpr int OLED_RESET = -1;
+
+Adafruit_SSD1306 display(
+    OLED_WIDTH,
+    OLED_HEIGHT,
+    &Wire,
+    OLED_RESET
+);
+
+// =========================================================
+// Animation state
+// =========================================================
+
+uint32_t lastAnimationTime = 0;
+uint32_t lastHeartbeatTime = 0;
+
+uint8_t animationFrame = 0;
+
+// =========================================================
+// Utility functions
+// =========================================================
+
+bool isI2CDeviceAvailable(uint8_t address)
+{
+    Wire.beginTransmission(address);
+
+    const uint8_t result = Wire.endTransmission();
+
+    return result == 0;
+}
+
+void showFatalError(const char* line1, const char* line2)
+{
+    Serial.println();
+    Serial.println("OLED PHASE FAILED");
+    Serial.println(line1);
+    Serial.println(line2);
+
+    /*
+     * We cannot display the error on the OLED because this
+     * function is used when OLED initialization has failed.
+     */
+    while (true) {
+        delay(1000);
+    }
+}
+
+void showStartupScreen()
+{
+    display.clearDisplay();
+
+    display.setTextColor(SSD1306_WHITE);
+
+    display.setTextSize(2);
+    display.setCursor(29, 8);
+    display.println("ALQAI");
+
+    display.drawLine(15, 32, 112, 32, SSD1306_WHITE);
+
+    display.setTextSize(1);
+    display.setCursor(21, 42);
+    display.println("EmotionCam");
+
+    display.setCursor(30, 54);
+    display.println("OLED READY");
+
+    display.display();
+}
+
+void drawSmile()
+{
+    display.drawLine(45, 47, 50, 52, SSD1306_WHITE);
+    display.drawLine(50, 52, 57, 56, SSD1306_WHITE);
+    display.drawLine(57, 56, 70, 56, SSD1306_WHITE);
+    display.drawLine(70, 56, 77, 52, SSD1306_WHITE);
+    display.drawLine(77, 52, 82, 47, SSD1306_WHITE);
+}
+
+void drawOpenEyes(int pupilOffset)
+{
+    // Left eye
+    display.fillRoundRect(
+        17,
+        13,
+        38,
+        27,
+        8,
+        SSD1306_WHITE
+    );
+
+    // Right eye
+    display.fillRoundRect(
+        73,
+        13,
+        38,
+        27,
+        8,
+        SSD1306_WHITE
+    );
+
+    // Pupils
+    display.fillCircle(
+        36 + pupilOffset,
+        26,
+        7,
+        SSD1306_BLACK
+    );
+
+    display.fillCircle(
+        92 + pupilOffset,
+        26,
+        7,
+        SSD1306_BLACK
+    );
+
+    // Small reflections
+    display.fillCircle(
+        34 + pupilOffset,
+        23,
+        2,
+        SSD1306_WHITE
+    );
+
+    display.fillCircle(
+        90 + pupilOffset,
+        23,
+        2,
+        SSD1306_WHITE
+    );
+}
+
+void drawClosedEyes()
+{
+    // Left closed eye
+    display.drawLine(18, 27, 28, 31, SSD1306_WHITE);
+    display.drawLine(28, 31, 39, 31, SSD1306_WHITE);
+    display.drawLine(39, 31, 51, 27, SSD1306_WHITE);
+
+    // Right closed eye
+    display.drawLine(75, 27, 86, 31, SSD1306_WHITE);
+    display.drawLine(86, 31, 97, 31, SSD1306_WHITE);
+    display.drawLine(97, 31, 109, 27, SSD1306_WHITE);
+}
+
+void drawFace(uint8_t frame)
+{
+    display.clearDisplay();
+
+    /*
+     * Frames:
+     * 0 = look left
+     * 1 = look center
+     * 2 = look right
+     * 3 = look center
+     * 4 = blink
+     * 5 = blink
+     */
+
+    switch (frame) {
+        case 0:
+            drawOpenEyes(-5);
+            break;
+
+        case 1:
+            drawOpenEyes(0);
+            break;
+
+        case 2:
+            drawOpenEyes(5);
+            break;
+
+        case 3:
+            drawOpenEyes(0);
+            break;
+
+        case 4:
+        case 5:
+            drawClosedEyes();
+            break;
+
+        default:
+            drawOpenEyes(0);
+            break;
+    }
+
+    drawSmile();
+
+    display.display();
+}
+
+// =========================================================
+// Arduino setup
+// =========================================================
+
+void setup()
+{
+    Serial.begin(115200);
+
+    // Allow native USB CDC to enumerate on Windows.
+    delay(5000);
+
+    Serial.println();
+    Serial.println("========================================");
+    Serial.println(" ALQAI EmotionCam - OLED Validation");
+    Serial.println("========================================");
+
+    Serial.printf("OLED SDA       : GPIO%d\n", OLED_SDA);
+    Serial.printf("OLED SCL       : GPIO%d\n", OLED_SCL);
+    Serial.printf("OLED address   : 0x%02X\n", OLED_ADDRESS);
+    Serial.printf(
+        "I2C frequency  : %lu Hz\n",
+        OLED_I2C_FREQUENCY
+    );
+
+    // Explicitly initialize I2C on GPIO1 and GPIO2.
+    const bool wireStarted = Wire.begin(
+        OLED_SDA,
+        OLED_SCL,
+        OLED_I2C_FREQUENCY
+    );
+
+    if (!wireStarted) {
+        showFatalError(
+            "Wire.begin() failed.",
+            "Check GPIO1 and GPIO2."
+        );
+    }
+
+    Serial.println("I2C controller : PASS");
+
+    /*
+     * Check whether a device acknowledges address 0x3C
+     * before starting the display library.
+     */
+    if (!isI2CDeviceAvailable(OLED_ADDRESS)) {
+        Serial.println("OLED detection : FAIL");
+        Serial.println("No response from address 0x3C.");
+
+        Serial.println();
+        Serial.println("Check:");
+        Serial.println("1. VCC connected to 3.3V");
+        Serial.println("2. GND connected");
+        Serial.println("3. SDA connected to GPIO1");
+        Serial.println("4. SCL connected to GPIO2");
+        Serial.println("5. OLED may use address 0x3D");
+
+        while (true) {
+            delay(1000);
+        }
+    }
+
+    Serial.println("OLED detected  : PASS");
+
+    /*
+     * The final false argument is important.
+     *
+     * We already initialized Wire using GPIO1 and GPIO2.
+     * Setting periphBegin=false prevents the SSD1306 library
+     * from calling Wire.begin() again using board-default pins.
+     */
+    const bool displayStarted = display.begin(
+        SSD1306_SWITCHCAPVCC,
+        OLED_ADDRESS,
+        true,
+        false
+    );
+
+    if (!displayStarted) {
+        showFatalError(
+            "SSD1306 initialization failed.",
+            "Display buffer allocation may have failed."
+        );
+    }
+
+    Serial.println("OLED initialize: PASS");
+
+    display.clearDisplay();
+    display.setTextWrap(false);
+    display.dim(false);
+
+    showStartupScreen();
+
+    Serial.printf(
+        "Free heap      : %u bytes\n",
+        ESP.getFreeHeap()
+    );
+
+    Serial.printf(
+        "Free PSRAM     : %u bytes\n",
+        ESP.getFreePsram()
+    );
+
+    Serial.println("----------------------------------------");
+    Serial.println("PHASE 2 STARTED");
+    Serial.println("Watch the OLED startup screen and eyes.");
+    Serial.println("========================================");
+
+    delay(2500);
+
+    drawFace(animationFrame);
+}
+
+// =========================================================
+// Arduino loop
+// =========================================================
+
+void loop()
+{
+    const uint32_t currentTime = millis();
+
+    // Change animation every 600 milliseconds.
+    if (currentTime - lastAnimationTime >= 600) {
+        lastAnimationTime = currentTime;
+
+        animationFrame++;
+
+        if (animationFrame > 5) {
+            animationFrame = 0;
+        }
+
+        drawFace(animationFrame);
+    }
+
+    // Print memory status every five seconds.
+    if (currentTime - lastHeartbeatTime >= 5000) {
+        lastHeartbeatTime = currentTime;
+
+        Serial.printf(
+            "[OLED heartbeat] uptime=%lu s | heap=%u | PSRAM=%u\n",
+            currentTime / 1000,
+            ESP.getFreeHeap(),
+            ESP.getFreePsram()
+        );
+    }
+
+    delay(10);
+}
