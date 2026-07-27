@@ -5,6 +5,14 @@
 [![PlatformIO](https://img.shields.io/badge/Environment-PlatformIO-green?style=for-the-badge&logo=platformio)](https://platformio.org/)
 [![Status](https://img.shields.io/badge/Status-Fully%20Functional-brightgreen?style=for-the-badge)](https://github.com/)
 
+## 🎥 Full Video Tutorial
+
+Watch the complete step-by-step tutorial for building and running this repository:
+
+[![Watch the Full Tutorial](https://img.shields.io/badge/YouTube-Watch%20Full%20Tutorial-red?style=for-the-badge&logo=youtube)](https://youtu.be/HVg4Ckbr2u0?si=53vZxwQ3lpP1c2IB)
+
+**Tutorial link:** [https://youtu.be/HVg4Ckbr2u0](https://youtu.be/HVg4Ckbr2u0?si=53vZxwQ3lpP1c2IB)
+
 An end-to-end, edge-AI computer vision system built around the **ESP32-S3** microcontroller. The **ALQAI EmotionCam** project implements real-time, on-device facial emotion recognition (classifying **neutral**, **happy**, **sad**, and **surprise**) directly from camera feeds using **TensorFlow Lite Micro (TFLM)**. 
 
 The project spans the entire TinyML development lifecycle:
