@@ -23,10 +23,10 @@ flowchart TD
         Dec -->|Raw RGB888| Crop[Exact Center Crop 400x400]
         Crop -->|RGB888 Crop| Resize[Bilinear Resize to 128x128]
         Resize -->|128x128 RGB| Quant[INT8 Quantization: pixel - 128]
-        Quant -->|Input Tensor [1,128,128,3]| TFLM[TensorFlow Lite Micro Interpreter]
+        Quant -->|"Input Tensor [1,128,128,3]"| TFLM[TensorFlow Lite Micro Interpreter]
         ModelSD[(SD Card /models/emotioncam_model.tflite)] -->|Load to PSRAM| TFLM
         TFLM -->|Execute Inference| Out[Output Logits]
-        Out -->|Class Map| UI[OLED SSD1306 Display & Web Stream Server]
+        Out -->|Class Map| UI["OLED SSD1306 Display & Web Stream Server"]
     end
     
     subgraph DevPC [Development PC / Model Training]
